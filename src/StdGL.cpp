@@ -1036,7 +1036,7 @@ bool CStdGL::RestoreDeviceObjects()
 		{
 			CStdGLShader vertexShader{CStdShader::Type::Vertex,
 				R"(
-				#version 120
+				#version 130
 
 				void main()
 				{
@@ -1055,7 +1055,7 @@ bool CStdGL::RestoreDeviceObjects()
 
 			CStdGLShader blitFragmentShader{CStdShader::Type::Fragment,
 				R"(
-				#version 120
+				#version 130
 
 				uniform sampler2D textureSampler;
 
@@ -1110,7 +1110,7 @@ bool CStdGL::RestoreDeviceObjects()
 
 			CStdGLShader landscapeFragmentShader{CStdShader::Type::Fragment,
 				R"(
-				#version 120
+				#version 130
 
 				uniform sampler2D textureSampler;
 				#ifdef LC_COLOR_ANIMATION
@@ -1171,7 +1171,7 @@ bool CStdGL::RestoreDeviceObjects()
 			{
 				CStdGLShader dummyVertexShader{CStdShader::Type::Vertex,
 				R"(
-					#version 120
+					#version 130
 
 					void main()
 					{
@@ -1184,7 +1184,7 @@ bool CStdGL::RestoreDeviceObjects()
 
 				CStdGLShader dummyFragmentShader{CStdShader::Type::Fragment,
 					R"(
-					#version 120
+					#version 130
 
 					uniform sampler1D gammaRed;
 					uniform sampler1D gammaGreen;
