@@ -781,6 +781,238 @@ void CStdGL::BlitLandscape(C4Surface *const sfcSource, C4Surface *const sfcSourc
 	ResetTexture();
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Feasibility probe: HD material overlay (see CStdDDraw::BlitLandscapeHdOverlay).
+//
+// The landscape's material index plane (CSurface8) is uploaded as an integer texture and a fragment shader redraws
+// every pixel of the flagged materials per fragment, in landscape coordinates. The pattern is therefore sampled at the
+// resolution of the display and not at one texel per landscape pixel, which is what the baked Surface32 is limited to.
+// GLSL 130 is the floor for this: usampler2D, texelFetch and textureSize do not exist in GLSL 120.
+// ---------------------------------------------------------------------------------------------------------------------
+
+namespace
+{
+constexpr int HdIndexTextureUnit = 6; // 0: texture, 1-2: liquid animation, 3-5: gamma
+
+const char *const HdOverlayVertexSource = R"GLSL(
+#version 130
+
+void main()
+{
+	gl_Position = ftransform();
+	gl_FrontColor = gl_Color;
+	gl_TexCoord[0] = gl_MultiTexCoord0; // landscape pixel coordinates
+}
+)GLSL";
+
+const char *const HdOverlayFragmentSource = R"GLSL(
+#version 130
+
+uniform usampler2D indexMap;
+uniform float hdMask[256];
+
+uint hash(uint x)
+{
+	x ^= x >> 16;
+	x *= 0x7feb352dU;
+	x ^= x >> 15;
+	x *= 0x846ca68bU;
+	x ^= x >> 16;
+	return x;
+}
+
+float cellRandom(ivec2 p)
+{
+	return float(hash(uint(p.x) * 73856093U ^ uint(p.y) * 19349663U)) * (1.0 / 4294967295.0);
+}
+
+float valueNoise(vec2 p)
+{
+	ivec2 i = ivec2(floor(p));
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(cellRandom(i), cellRandom(i + ivec2(1, 0)), f.x),
+		mix(cellRandom(i + ivec2(0, 1)), cellRandom(i + ivec2(1, 1)), f.x), f.y);
+}
+
+// Fractal noise in landscape space. An octave fades out once it is finer than one screen pixel (footprint is the size
+// of a fragment in landscape pixels), so the material gains detail with the display scale without aliasing at 100%.
+float fbm(vec2 p, float frequency, float footprint)
+{
+	float sum = 0.0;
+	float norm = 0.0;
+	float amplitude = 0.5;
+	for (int octave = 0; octave < 6; ++octave)
+	{
+		float fade = 1.0 - smoothstep(0.25, 0.5, frequency * footprint);
+		sum += amplitude * fade * valueNoise(p * frequency);
+		norm += amplitude * fade;
+		frequency *= 2.03;
+		amplitude *= 0.5;
+	}
+	return norm > 0.0 ? sum / norm : 0.5;
+}
+
+void main()
+{
+	vec2 pos = gl_TexCoord[0].st;
+	float footprint = max(fwidth(pos.x), fwidth(pos.y));
+
+	ivec2 cell = clamp(ivec2(floor(pos)), ivec2(0), textureSize(indexMap, 0) - ivec2(1));
+	uint index = texelFetch(indexMap, cell, 0).r;
+	if (hdMask[index] < 0.5) discard;
+
+	float broad = fbm(pos, 0.045, footprint);
+	float medium = fbm(pos + vec2(17.0, 31.0), 0.35, footprint);
+	float fine = fbm(pos + vec2(5.0, 91.0), 1.9, footprint);
+	vec3 soil = mix(vec3(0.30, 0.19, 0.10), vec3(0.52, 0.36, 0.20), broad);
+	soil *= 0.75 + 0.5 * medium;
+	soil *= 0.88 + 0.24 * fine;
+	float pebble = smoothstep(0.80, 0.86, fbm(pos + vec2(63.0, 7.0), 0.7, footprint));
+	soil = mix(soil, vec3(0.62, 0.58, 0.52), 0.5 * pebble);
+	if ((index & 128u) != 0u) soil *= 0.55; // background variant (IFT)
+
+	// same convention as the landscape shader: alpha is transparency, added to the modulation alpha
+	gl_FragColor = vec4(clamp(soil, 0.0, 1.0) * gl_Color.rgb, clamp(gl_Color.a, 0.0, 1.0));
+}
+)GLSL";
+}
+
+void CStdGL::BlitLandscapeHdOverlay(CSurface8 *const sfcIndex, const uint8_t *const hdMask, const int fx, const int fy,
+	C4Surface *const sfcTarget, const int tx, const int ty, const int wdt, const int hgt)
+{
+	// safety
+	if (hdOverlayUnavailable || !sfcIndex || !sfcIndex->Bits || !hdMask || !sfcTarget || wdt <= 0 || hgt <= 0) return;
+	assert(sfcTarget->IsRenderTarget());
+	if (ClipAll) return;
+	if (!PrepareRendering(sfcTarget)) return;
+
+	try
+	{
+		// shader, compiled on first use
+		if (!HdOverlayShader)
+		{
+			CStdGLShader vertexShader{CStdShader::Type::Vertex, HdOverlayVertexSource};
+			vertexShader.Compile();
+			CStdGLShader fragmentShader{CStdShader::Type::Fragment, HdOverlayFragmentSource};
+			fragmentShader.Compile();
+
+			HdOverlayShader.AddShader(&vertexShader);
+			HdOverlayShader.AddShader(&fragmentShader);
+			HdOverlayShader.Link();
+			HdOverlayShader.Select();
+			HdOverlayShader.SetUniform("indexMap", glUniform1i, HdIndexTextureUnit);
+			CStdShaderProgram::Deselect();
+		}
+
+		// index texture, one texel per landscape pixel
+		const int mapWidth = sfcIndex->Wdt, mapHeight = sfcIndex->Hgt;
+		if (!HdIndexTexture || hdIndexWidth != mapWidth || hdIndexHeight != mapHeight)
+		{
+			GLint maxSize = 0;
+			glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxSize);
+			if (mapWidth > maxSize || mapHeight > maxSize)
+			{
+				throw CStdRenderException{"landscape is larger than the maximum texture size"};
+			}
+
+			HdIndexTexture = {{mapWidth, mapHeight}, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE};
+			HdIndexTexture.Bind(HdIndexTextureUnit);
+			// integer textures are incomplete with the default (mipmapped) minification filter
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			HdIndexTexture.SetData(nullptr);
+			hdIndexWidth = mapWidth;
+			hdIndexHeight = mapHeight;
+		}
+		else
+		{
+			HdIndexTexture.Bind(HdIndexTextureUnit);
+		}
+
+		// Upload what is on screen (plus a margin for neighbourhood lookups). Without dirty tracking this costs
+		// visible-area bytes per viewport and frame; the rest of the texture keeps whatever it last received.
+		constexpr int Margin = 2;
+		const int x0 = std::max(fx - Margin, 0), y0 = std::max(fy - Margin, 0);
+		const int x1 = std::min(fx + wdt + Margin, mapWidth), y1 = std::min(fy + hgt + Margin, mapHeight);
+		if (x1 <= x0 || y1 <= y0)
+		{
+			glActiveTexture(GL_TEXTURE0);
+			return;
+		}
+
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, sfcIndex->Pitch);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0, GL_RED_INTEGER, GL_UNSIGNED_BYTE,
+			sfcIndex->Bits + static_cast<std::ptrdiff_t>(y0) * sfcIndex->Pitch + x0);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+		// state, as in BlitLandscape (shader path)
+		SetTexture();
+		HdOverlayShader.Select();
+		GLfloat maskValues[256];
+		for (int i = 0; i < 256; ++i) maskValues[i] = hdMask[i] ? 1.0f : 0.0f;
+		HdOverlayShader.SetUniform("hdMask", glUniform1fv, 256, static_cast<const GLfloat *>(maskValues));
+
+		glShadeModel((fUseClrModMap && !Config.Graphics.NoBoxFades) ? GL_SMOOTH : GL_FLAT);
+		glMatrixMode(GL_MODELVIEW);
+		glLoadIdentity();
+
+		// The fog of war modulation is evaluated per 64x64 landscape chunk, exactly like BlitLandscape does it, so
+		// that the overlay is modulated like the pixels it covers.
+		const uint32_t dwModClr = BlitModulated ? BlitModulateClr : 0xffffff;
+		const bool chunked = fUseClrModMap && dwModClr;
+		constexpr int ChunkSize = 64;
+		const int xStart = std::max(fx, 0), xLimit = std::min(fx + wdt, mapWidth);
+		const int yStart = std::max(fy, 0), yLimit = std::min(fy + hgt, mapHeight);
+
+		for (int y = yStart, yEnd = 0; y < yLimit; y = yEnd)
+		{
+			yEnd = chunked ? std::min(yLimit, (y / ChunkSize + 1) * ChunkSize) : yLimit;
+			for (int x = xStart, xEnd = 0; x < xLimit; x = xEnd)
+			{
+				xEnd = chunked ? std::min(xLimit, (x / ChunkSize + 1) * ChunkSize) : xLimit;
+
+				const float left = static_cast<float>(x - fx + tx), right = static_cast<float>(xEnd - fx + tx);
+				const float top = static_cast<float>(y - fy + ty), bottom = static_cast<float>(yEnd - fy + ty);
+				const std::array<float, 4>
+					sx{left, right, left, right},
+					sy{top, top, bottom, bottom},
+					lx{static_cast<float>(x), static_cast<float>(xEnd), static_cast<float>(x), static_cast<float>(xEnd)},
+					ly{static_cast<float>(y), static_cast<float>(y), static_cast<float>(yEnd), static_cast<float>(yEnd)};
+
+				glBegin(GL_TRIANGLE_STRIP);
+				for (int i = 0; i < 4; ++i)
+				{
+					uint32_t color = dwModClr;
+					if (chunked)
+					{
+						color = pClrModMap->GetModAt(static_cast<int>(sx[i]), static_cast<int>(sy[i]));
+						ModulateClr(color, dwModClr);
+					}
+					glColorDw(color);
+					glTexCoord2f(lx[i], ly[i]);
+					glVertex2f(sx[i] + blitOffset, sy[i] + blitOffset);
+				}
+				glEnd();
+			}
+		}
+
+		CStdShaderProgram::Deselect();
+		glActiveTexture(GL_TEXTURE0);
+		ResetTexture();
+	}
+	catch (const CStdRenderException &e)
+	{
+		logger->error("HD material overlay disabled: {}", e.what());
+		hdOverlayUnavailable = true;
+		HdOverlayShader.Clear();
+		glActiveTexture(GL_TEXTURE0);
+	}
+}
+
 bool CStdGL::CreateDirectDraw()
 {
 	logger->info("Using OpenGL...");
@@ -1296,6 +1528,11 @@ bool CStdGL::InvalidateDeviceObjects()
 		LandscapeShader.Clear();
 		DummyShader.Clear();
 	}
+
+	HdOverlayShader.Clear();
+	HdIndexTexture.Clear();
+	hdIndexWidth = hdIndexHeight = 0;
+	hdOverlayUnavailable = false;
 
 	if (GammaRedTexture)
 	{

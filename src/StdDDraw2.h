@@ -338,6 +338,11 @@ public:
 	// Blit
 	virtual void BlitLandscape(C4Surface *sfcSource, C4Surface *sfcSource2, C4Surface *sfcLiquidAnimation, int fx, int fy,
 		C4Surface *sfcTarget, int tx, int ty, int wdt, int hgt);
+	// Feasibility probe (see C4Landscape::Draw): redraws every landscape pixel whose material index byte is flagged in
+	// hdMask (256 entries, indexed by the Surface8 byte) with a shader that evaluates the material in world space.
+	// Same coordinate convention as BlitLandscape. Backends without shader support do nothing.
+	virtual void BlitLandscapeHdOverlay(CSurface8 *sfcIndex, const uint8_t *hdMask, int fx, int fy,
+		C4Surface *sfcTarget, int tx, int ty, int wdt, int hgt) {}
 	void Blit8Fast(CSurface8 *sfcSource, int fx, int fy,
 		C4Surface *sfcTarget, int tx, int ty, int wdt, int hgt);
 	bool Blit(C4Surface *sfcSource, float fx, float fy, float fwdt, float fhgt,

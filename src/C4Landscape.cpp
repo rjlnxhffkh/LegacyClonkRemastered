@@ -17,6 +17,7 @@
 /* Handles landscape and sky */
 
 #include <C4Landscape.h>
+#include <C4Strings.h>
 #include <C4SolidMask.h>
 
 #include <C4Map.h>
@@ -39,6 +40,7 @@
 #include <StdPNG.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -263,6 +265,32 @@ void C4Landscape::Clear(bool fClearMapCreator, bool fClearSky)
 	PixCntPitch = 0;
 }
 
+// Feasibility probe, not part of the game logic: LC_HDMAT=<material name> (e.g. Earth) redraws every pixel of that
+// material with a shader that evaluates it per fragment in landscape coordinates (CStdDDraw::BlitLandscapeHdOverlay).
+static void DrawHdMaterialProbe(CSurface8 *index, const C4FacetEx &cgo)
+{
+	static const char *const materialName = std::getenv("LC_HDMAT");
+	if (!materialName || !*materialName) return;
+
+	// flag every texmap entry of the material, with and without the background (IFT) bit
+	uint8_t mask[256]{};
+	bool any = false;
+	for (int32_t tex = 1; tex < C4M_MaxTexIndex; ++tex)
+	{
+		const C4TexMapEntry *const entry = Game.TextureMap.GetEntry(tex);
+		if (!entry || entry->isNull()) continue;
+		if (SEqualNoCase(entry->GetMaterialName(), materialName))
+		{
+			mask[tex] = mask[tex | IFT] = 1;
+			any = true;
+		}
+	}
+	if (any)
+	{
+		Application.DDraw->BlitLandscapeHdOverlay(index, mask, cgo.TargetX, cgo.TargetY, cgo.Surface, cgo.X, cgo.Y, cgo.Wdt, cgo.Hgt);
+	}
+}
+
 void C4Landscape::Draw(C4FacetEx &cgo, int32_t iPlayer)
 {
 	if (Modulation) Application.DDraw->ActivateBlitModulation(Modulation);
@@ -272,7 +300,10 @@ void C4Landscape::Draw(C4FacetEx &cgo, int32_t iPlayer)
 	if (Game.GraphicsSystem.ShowSolidMask)
 		Application.DDraw->Blit8Fast(Surface8, cgo.TargetX, cgo.TargetY, cgo.Surface, cgo.X, cgo.Y, cgo.Wdt, cgo.Hgt);
 	else
+	{
 		Application.DDraw->BlitLandscape(Surface32, AnimationSurface, &Game.GraphicsResource.sfcLiquidAnimation, cgo.TargetX, cgo.TargetY, cgo.Surface, cgo.X, cgo.Y, cgo.Wdt, cgo.Hgt);
+		DrawHdMaterialProbe(Surface8, cgo);
+	}
 	if (Modulation) Application.DDraw->DeactivateBlitModulation();
 }
 

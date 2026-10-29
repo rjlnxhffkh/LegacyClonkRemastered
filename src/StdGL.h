@@ -266,6 +266,11 @@ protected:
 	CStdGLShaderProgram BlitShaderMod2;
 	CStdGLShaderProgram LandscapeShader;
 	CStdGLShaderProgram DummyShader;
+	// feasibility probe: material index plane + shader for HD material overlay
+	CStdGLShaderProgram HdOverlayShader;
+	CStdGLTexture<GL_TEXTURE_2D, 2> HdIndexTexture;
+	int hdIndexWidth{0}, hdIndexHeight{0};
+	bool hdOverlayUnavailable{false};
 	CStdGLTexture<GL_TEXTURE_1D, 1> GammaRedTexture;
 	CStdGLTexture<GL_TEXTURE_1D, 1> GammaGreenTexture;
 	CStdGLTexture<GL_TEXTURE_1D, 1> GammaBlueTexture;
@@ -293,6 +298,8 @@ public:
 	// Blit
 	void PerformBlt(CBltData &rBltData, C4TexRef *pTex, uint32_t dwModClr, bool fMod2, bool fExact) override;
 	virtual void BlitLandscape(C4Surface *sfcSource, C4Surface *sfcSource2, C4Surface *sfcLiquidAnimation, int fx, int fy,
+		C4Surface *sfcTarget, int tx, int ty, int wdt, int hgt) override;
+	void BlitLandscapeHdOverlay(CSurface8 *sfcIndex, const uint8_t *hdMask, int fx, int fy,
 		C4Surface *sfcTarget, int tx, int ty, int wdt, int hgt) override;
 	void FillBG(uint32_t dwClr = 0) override;
 
